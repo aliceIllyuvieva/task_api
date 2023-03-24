@@ -1,21 +1,10 @@
 from flask import Flask, request, jsonify
 from datetime import datetime
+import dbd
+import json
+import pandas as pd
 
 app = Flask(__name__)
-
-# Пример базы данных пользователей
-users = [
-    {"id": 1, "name": "Alice", "age": 25, "balance": 2000},
-    {"id": 2, "name": "Bob", "age": 30, "balance": 3000},
-    {"id": 3, "name": "Charlie", "age": 35, "balance": 4000},
-]
-
-balances_info = [{"user_id": 1, "balance": 2000, "date": '2023-03-22'},
-                {"user_id": 2,  "balance": 3000, "date": '2023-03-22'},
-                {"user_id": 3,  "balance": 4000, "date": '2023-03-22'},
-]
-
-transactions_all = []
 
 # Функция добавления пользователя
 @app.route('/users', methods=['POST'])
@@ -24,24 +13,25 @@ def add_user():
     input_1 = request.form.get('user', '')
     input_2 = request.form.get('age', '')
     input_3 = request.form.get('balance', '')
-    
-    # # Генерируем уникальный идентификатор для пользователя
+
+    engine = dbd.get_connection()
+    users = pd.read_sql(f"""select * from Users""", engine)
+    # Генерируем уникальный идентификатор для пользователя
     user_id = len(users) + 1
 
-    user = {}
-    user['name'] = input_1
-    user['age'] = input_2
-    user['balance'] = int(input_3)
-    user['id'] = user_id
+    balance_info = pd.read_sql(f"""select * from BalancesInfo""", engine)
+    engine.execute(f"""INSERT INTO BalancesInfo (user_id, balance, date) VALUES ({user_id}, {input_3}, '{datetime.today().strftime('%Y-%m-%d')}')""")
 
-    balance_info = {}
-    balance_info['user_id'] = user_id
-    balance_info['balance'] = int(input_3)
-    balance_info['date'] = datetime.today().strftime('%Y-%m-%d')
-    balances_info.append(balance_info)
     # # Добавляем пользователя в базу данных
-    users.append(user)
+    engine.execute(f"""INSERT INTO Users (id, name, age, balance) VALUES ({user_id}, '{input_1}', {input_2}, {input_3})""")
 
+
+    new_user = pd.read_sql(f"""select * from Users where name = '{input_1}' """, engine)
+    user = {}
+    user['name'] = str(new_user['name'][0])
+    user['age'] = str(new_user['age'][0])
+    user['balance'] = str(new_user['balance'][0])
+    user['id'] = str(new_user['id'][0])
     # Возвращаем ответ с информацией о новом пользователе
     return jsonify(user), 201
 
@@ -49,23 +39,29 @@ def add_user():
 # Функция просмотра текущих пользователей
 @app.route('/users', methods=['GET'])
 def get_users():
-
+    engine = dbd.get_connection()
+    users = pd.read_sql(f"""select * from Users""", engine)
+    users = users.to_json('t.json',orient='records', indent=4)
+    with open("t.json") as jsonFile:
+        jsonObject = json.load(jsonFile)
+        jsonFile.close()
     # Возвращаем ответ с информацией о пользователях
-    return jsonify(users), 201
+    return jsonify(jsonObject), 201
 
 
 # Функция добавления транзакции
 @app.route('/transactions', methods=['POST'])
 def add_transaction():
+    engine = dbd.get_connection()
     # Получаем данные транзакции из запроса
     transaction_type = request.form.get('transaction_type', '')
     user_id = int(request.form.get('user_id', ''))
     amount = float(request.form.get('amount', ''))
-    # transaction_type = transaction.get('type')
     
     # Проверяем, что пользователь с таким идентификатором существует
-    user = next((u for u in users if u['id'] == user_id), None)
-    if not user:
+    user = pd.read_sql(f"""select * from Users where id = {user_id}""", engine)
+
+    if user.empty:
         return jsonify({'error': 'User not found'}), 404
     
     # Проверяем, что тип транзакции указан корректно
@@ -75,96 +71,122 @@ def add_transaction():
     # Проверяем, что сумма транзакции положительна
     if amount <= 0:
         return jsonify({'error': 'Transaction amount must be positive'}), 400
-    transactions = {}
+
     # Обновляем баланс пользователя в зависимости от типа транзакции
+    transactions_all = pd.read_sql(f"""select * from TransactionsAll""", engine)
     trans_id = len(transactions_all) + 1
     if transaction_type == 'DEPOSIT':
-        user['balance'] += amount
-        transactions['type'] = 'DEPOSIT'
-        transactions['amount'] = amount
-        transactions['person_id'] = user_id
-        transactions['id'] = trans_id
-        transactions_all.append(transactions)
+
+        new_b = user['balance'][0] + amount
+        engine.execute(f"""UPDATE Users SET balance = {new_b} where id = {user['id'][0]}""")
+        engine.execute(f"""INSERT INTO TransactionsAll (type, amount, person_id, id) VALUES ('DEPOSIT', {amount}, {user_id}, {trans_id})""")
+
     else:
-        if user['balance'] < amount:
+        if user['balance'][0] < amount:
             return jsonify({'error': 'Not enough balance'}), 400
         else:
-            user['balance'] -= amount
-            transactions['type'] = 'WITHDRAW'
-            transactions['amount'] = amount
-            transactions['person_id'] = user_id
-            transactions['id'] = trans_id
-            transactions_all.append(transactions)
-    return jsonify(transactions), 201
+            new_b = user['balance'][0] - amount
+            engine.execute(f"""UPDATE Users SET balance = {new_b} where id = {user['id'][0]}""")
+            engine.execute(f"""INSERT INTO TransactionsAll (type, amount, person_id, id) VALUES ('WITHDRAW', {amount}, {user_id}, {trans_id})""")
+
+    transactions = pd.read_sql(f"""select * from TransactionsAll""", engine)
+    transactions = transactions.to_json('t.json',orient='records', indent=4)
+    with open("t.json") as jsonFile:
+        jsonObject = json.load(jsonFile)
+        jsonFile.close()
+    return jsonify(jsonObject), 201
 
 
 # Функция просмотра всех транзакций
 @app.route('/transactions', methods=['GET'])
 def get_transactions():
-
+    engine = dbd.get_connection()
+    transactions_all = pd.read_sql(f"""select * from TransactionsAll""", engine)
+    transactions_all = transactions_all.to_json('t.json',orient='records', indent=4)
+    with open("t.json") as jsonFile:
+        jsonObject = json.load(jsonFile)
+        jsonFile.close()
     # Возвращаем ответ с информацией о всех транзакциях
-    return jsonify(transactions_all), 201
+    return jsonify(jsonObject), 201
 
 
 # Функция просмотра конкретной транзакции
 @app.route('/transactions_info/<id_transaction>', methods=['GET'])
 def get_transactions_by_person(id_transaction:int):
-    tr = ''
-    existence = 0
-    for t in transactions_all:
-        if int(t['id']) == int(id_transaction):
-            # Возвращаем ответ с информацией о транзакции
-            existence = 1
-            return jsonify(t), 201
-    if existence == 0:
+    engine = dbd.get_connection()
+    transaction = pd.read_sql(f"""select * from TransactionsAll where id = {id_transaction}""", engine)
+    if transaction.empty == False:
+        t = {}
+        t['type'] = str(transaction['type'][0])
+        t['amount'] = str(transaction['amount'][0])
+        t['person_id'] = str(transaction['person_id'][0])
+        t['id'] = str(transaction['id'][0])
+        return jsonify(t), 201
+    else:
         return jsonify({'error': 'No such transaction'}), 400
 
 
 # Функция просмотра текущего баланса пользователя
 @app.route('/user/<idt>/balance', methods=['GET'])
 def get_user_balance(idt: int):
-    existence = 0
-    for user in users:
-        if int(user['id']) == int(idt):
-            # Возвращаем ответ с информацией о балансе пользователя
-            existence = 1
-            return jsonify(user), 201
-    if existence == 0:
+    engine = dbd.get_connection()
+    user_balance = pd.read_sql(f"""select * from Users where id = {idt}""", engine)
+    if user_balance.empty == False:
+        u = {}
+        u['user_id'] = str(user_balance['id'][0])
+        u['balance'] = str(user_balance['name'][0])
+        u['date'] = str(user_balance['age'][0])
+        u['balance'] = str(user_balance['balance'][0])
+        return jsonify(u), 201
+    else:
         return jsonify({'error': 'No such user'}), 400
 
 
 # Функция обновления инфо по балансу юзера (запускаем например в конце дня один раз)
 @app.route('/balance/info/update', methods=['POST'])
 def update_balance():
+    engine = dbd.get_connection()
+    users = pd.read_sql(f"""select id from Users""", engine)
+    users = set(users['id'])
     for user in users:
-        balance_i = {}
-        balance_i['user_id'] = user['id']
-        balance_i['balance'] = user['balance']
-        balance_i['date'] = datetime.today().strftime('%Y-%m-%d')
-        balances_info.append(balance_i)
+        balance = pd.read_sql(f"""select balance from Users where id = {user}""", engine)
+        engine.execute(f"""INSERT INTO BalancesInfo (user_id, balance, date) VALUES ({user}, {float(balance['balance'][0])}, '{datetime.today().strftime('%Y-%m-%d')}') """)
 
     # Возвращаем ответ с информацией о балансах по датам
-    return jsonify(balances_info), 201
+    balances = pd.read_sql(f"""select * from BalancesInfo""", engine)
+    balances.to_json('t.json',orient='records', indent=4)
+    with open("t.json") as jsonFile:
+        jsonObject = json.load(jsonFile)
+        jsonFile.close()
+    return jsonify(jsonObject), 201
 
 
+# Функция получения инфо о балансах
 @app.route('/balance/db', methods=['GET'])
 def get_balance_db():
-
+    engine = dbd.get_connection()
+    balances = pd.read_sql(f"""select * from BalancesInfo""", engine)
+    balances.to_json('t.json',orient='records', indent=4)
+    with open("t.json") as jsonFile:
+        jsonObject = json.load(jsonFile)
+        jsonFile.close()
     # Возвращаем ответ с информацией о балансах по датам
-    return jsonify(balances_info), 201
+    return jsonify(jsonObject), 201
 
 
-# Функция обновления инфо по балансу юзера (запускаем например в конце дня один раз)
+# Функция получения инфо о балансе человека на конкретную дату
 @app.route('/user/<idt>/balance/by/date', methods=['GET'])
 def get_user_balance_by_date(idt):
-    existence = 0
+    engine = dbd.get_connection()
     input_date = request.form.get('date', '')
-    for row in balances_info:
-        if int(row['user_id']) == int(idt) and str(row['date']) == str(input_date):
-            # Возвращаем ответ с информацией о балансе юзера на конкретную дату
-
-            return jsonify(row), 201
-    if existence == 0:
+    balances = pd.read_sql(f"""select * from BalancesInfo where user_id = {idt} and date = '{input_date}' """, engine)
+    if balances.empty == False:
+        balances.to_json('t.json',orient='records', indent=4)
+        with open("t.json") as jsonFile:
+            jsonObject = json.load(jsonFile)
+            jsonFile.close()
+            return jsonify(jsonObject), 201
+    else:
         return jsonify({'error': 'No such user or no such date in db'}), 400
 
 
